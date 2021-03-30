@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 
 #include <stdio.h>
+#include <signal.h>
 #include <string.h>
 #include <assert.h>
 
@@ -29,6 +30,8 @@ typedef struct {
   int sock;
 } buf_info;
 
+static volatile int running = 1; //epoll_main_loop flag
+
 #define MAX_BUFFERS 16
 
 buf_info bufs[MAX_BUFFERS];
@@ -46,6 +49,18 @@ char *bind_name = "0.0.0.0";
 int bind_port = 7891;
 
 int no_delay = 1;
+
+char* storage_path = NULL;
+int storage_fd = -1;
+
+void sigint_cleanup(int _) {
+  (void)_; //to avoid unused var warnings 
+  running = 0;
+  
+  if (storage_fd >= 0) {
+    close(storage_fd);
+  }
+}
 
 // add the IP/port into the socks[] map to allow FORWARD finding an
 // already set-up socket, through sock_find()
@@ -157,6 +172,33 @@ void compute_for(unsigned long usecs) {
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts_end);
   } while (ts_sub_us(ts_end, ts_beg) < usecs);
 }
+ 
+ssize_t store(size_t bytes) {
+  //generate the data to be stored
+  char* tmp = (char*) malloc(bytes + 1);
+  ssize_t wrote;
+  cw_log("STORE: storing %lu bytes\n", bytes);
+
+  memset(tmp, 'X', bytes);
+  tmp[bytes] = '\0';
+
+  sys_check(wrote = write(storage_fd, tmp, bytes));
+  fsync(storage_fd);
+
+  free(tmp);
+  return wrote;
+}
+
+ssize_t load(size_t bytes) {
+  char* tmp = (char*) malloc(bytes + 1);
+  ssize_t read;
+  cw_log("LOAD: loading %lu bytes\n", bytes);
+
+  sys_check(read = pread(storage_fd, tmp, bytes, 0));
+
+  free(tmp);
+  return read;
+}
 
 void process_messages(int sock, int buf_id) {
   size_t received = recv(sock, bufs[buf_id].curr_buf, bufs[buf_id].curr_size, 0);
@@ -180,6 +222,9 @@ void process_messages(int sock, int buf_id) {
 
   unsigned char *buf = bufs[buf_id].buf;
   unsigned long msg_size = bufs[buf_id].curr_buf - buf;
+
+  ssize_t data = -1;
+
   // batch processing of multiple messages, if received more than 1
   do {
     cw_log("msg_size=%lu\n", msg_size);
@@ -202,9 +247,20 @@ void process_messages(int sock, int buf_id) {
 	// rest of cmds[] are for next hop, not me
 	break;
       } else if (m->cmds[i].cmd == REPLY) {
+        printf("data %ld\n", data);
+	printf("pkt %u\n", m->cmds[i].u.fwd.pkt_size);
+        //check for partial data load
+	if (data >= 0) {
+          m->cmds[i].u.fwd.pkt_size += data - m->cmds[i-1].u.load_nbytes;
+	  data = -1;
+	}
 	reply(sock, m, i);
 	// any further cmds[] for replied-to hop, not me
 	break;
+      } else if (m->cmds[i].cmd == STORE) {
+        store(m->cmds[i].u.store_nbytes);
+      } else if (m->cmds[i].cmd == LOAD) {
+        data = load(m->cmds[i].u.load_nbytes);
       } else {
 	cw_log("Unknown cmd: %d\n", m->cmds[0].cmd);
 	exit(-1);
@@ -287,7 +343,7 @@ void epoll_main_loop(int listen_sock) {
     exit(EXIT_FAILURE);
   }
 
-  for (;;) {
+  while (running) {
     cw_log("epoll_wait()ing...\n");
     int nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
     if (nfds == -1) {
@@ -357,7 +413,7 @@ int main(int argc, char *argv[]) {
   argc--;  argv++;
   while (argc > 0) {
     if (strcmp(argv[0], "-h") == 0 || strcmp(argv[0], "--help") == 0) {
-      printf("Usage: node [-h|--help] [-b bindname] [-bp bindport]\n");
+      printf("Usage: node [-h|--help] [-b bindname] [-bp bindport] [-s|--storage path/to/storage/file]\n");
       exit(0);
     } else if (strcmp(argv[0], "-b") == 0) {
       assert(argc >= 2);
@@ -367,16 +423,23 @@ int main(int argc, char *argv[]) {
       assert(argc >= 2);
       bind_port = atol(argv[1]);
       argc--;  argv++;
-    } else if (strcmp(argv[0], "-nd") == 0 || strcmp(argv[0], "--no-delay") == 0) {
+    } else if (strcmp(argv[0], "-nd") == 0 || strcmp(argv[0], "--no-delay") == 0) { //not implemented
       assert(argc >= 2);
       no_delay = atoi(argv[1]);
       argc--;  argv++;
-    } else {
+    } else if (strcmp(argv[0], "-s") == 0 || strcmp(argv[0], "--storage") == 0) {
+      assert(argc >= 2);
+      storage_path = argv[1];
+      argc--;  argv++; 
+    }else {
       printf("Unrecognized option: %s\n", argv[0]);
       exit(-1);
     }
     argc--;  argv++;
   }
+
+  //Setup SIGINT signal handler
+  signal(SIGINT, sigint_cleanup);
 
   // Tag all buf_info as unused
   for (int i = 0; i < MAX_BUFFERS; i++) {
@@ -386,6 +449,11 @@ int main(int argc, char *argv[]) {
   // Tag all sock_info as unused
   for (int i = 0; i < MAX_SOCKETS; i++) {
     socks[i].sock = -1;
+  }
+
+  // Open storage file, if any
+  if (storage_path) {
+    sys_check(storage_fd = open(storage_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR));
   }
 
   /*---- Create the socket. The three arguments are: ----*/
