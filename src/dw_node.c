@@ -821,8 +821,7 @@ void* storage_worker(void* args) {
     return (void*)1;
 }
 
-void* epoll_main_loop(void* args) {
->>>>>>> 58c3d96 (dw_node: first prototype of dedicated storage thread using epoll (issue #27 and #21))
+void* conn_worker(void* args) {
     thread_info_t *infos = (thread_info_t *)args;
 
     if (thread_affinity) {
