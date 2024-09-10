@@ -28,7 +28,6 @@
 __thread char thread_name[16];
 
 int use_wait_spinning = 0;
-int use_period = 1;
 
 ccmd_t* ccmd = NULL; // Ordered chain of commands
 
@@ -150,38 +149,37 @@ void *thread_sender(void *data) {
             break;
         }
 
-        if (use_period) {
-            unsigned long period_ns = pd_sample(&send_period_us_pd) * 1000.0;
-            dw_log("period_ns=%lu\n", period_ns);
-            struct timespec ts_delta =
-                (struct timespec) { period_ns / 1000000000, period_ns % 1000000000 };
+        unsigned long period_ns = pd_sample(&send_period_us_pd) * 1000.0;
+        dw_log("period_ns=%lu\n", period_ns);
+        struct timespec ts_delta =
+            (struct timespec) { period_ns / 1000000000, period_ns % 1000000000 };
 
-            ts_now = ts_add(ts_now, ts_delta);
+        ts_now = ts_add(ts_now, ts_delta);
 
-            if (use_wait_spinning) {
-                struct timespec ts;
-                do {
-                    clock_gettime(clk_id, &ts);
-                } while (ts_leq(ts, ts_now));
-            } else {
-                sys_check(clock_nanosleep(clk_id, TIMER_ABSTIME, &ts_now, NULL));
-            }
+        if (use_wait_spinning) {
+            struct timespec ts;
+            do {
+                clock_gettime(clk_id, &ts);
+            } while (ts_leq(ts, ts_now));
         } else {
-            if (ramp_step_secs != 0 && pkt_id > 0) {
-                int step =
-                    usecs_send[thread_id][idx(pkt_id)] / 1000000 / ramp_step_secs;
-                int old_rate = 1000000.0 / send_period_us_pd.val;
-                int rate;
-                if (ramp_fname != NULL)
-                    rate = rates[(step < ramp_num_steps) ? step
-                                                        : (ramp_num_steps - 1)];
-                else
-                    rate = rate_start + step * ramp_delta_rate;
-                send_period_us_pd.val = 1000000.0 / rate;
-                if (old_rate != rate)
-                    dw_log("old_rate: %d, rate: %d\n", old_rate, rate);
-            }
+            sys_check(clock_nanosleep(clk_id, TIMER_ABSTIME, &ts_now, NULL));
         }
+
+        if (ramp_step_secs != 0 && pkt_id > 0) {
+            int step =
+                usecs_send[thread_id][idx(pkt_id)] / 1000000 / ramp_step_secs;
+            int old_rate = 1000000.0 / send_period_us_pd.val;
+            int rate;
+            if (ramp_fname != NULL)
+                rate = rates[(step < ramp_num_steps) ? step
+                                                    : (ramp_num_steps - 1)];
+            else
+                rate = rate_start + step * ramp_delta_rate;
+            send_period_us_pd.val = 1000000.0 / rate;
+            if (old_rate != rate)
+                dw_log("old_rate: %d, rate: %d\n", old_rate, rate);
+        }
+
     }
 
     dw_log("Sender thread terminating\n");
@@ -462,19 +460,15 @@ static error_t argp_client_parse_opt(int key, char *arg, struct argp_state *stat
         break;
     case RAMP_NUM_STEPS:
         ramp_num_steps = atoi(arg);
-        use_period = 0;
         break;
     case RAMP_STEP_SECS:
         ramp_step_secs = atoi(arg);
-        use_period = 0;
         break;
     case RAMP_DELTA_RATE:
         ramp_delta_rate = atoi(arg);
-        use_period = 0;
         break;
     case RATE_FILENAME:
         ramp_fname = arg;
-        use_period = 0;
         break;
     case COMP_TIME: {
         pd_spec_t val;
@@ -724,11 +718,16 @@ int main(int argc, char *argv[]) {
             send_period_us_pd.val = 1000000.0 / rates[0];
             if (num_pkts == 0 || num_pkts > cnt) num_pkts = cnt;
         } else {
-            num_pkts = 0;
-            int r = send_period_us_pd.val;
+            unsigned long new_num_pkts = 0;
+            int r = 1000000.0 / send_period_us_pd.val;
             for (int s = 0; s < ramp_num_steps; s++) {
-                num_pkts += r * ramp_step_secs;
+                new_num_pkts += r * ramp_step_secs;
                 r += ramp_delta_rate;
+            }
+
+            if (new_num_pkts <= MAX_PKTS && new_num_pkts > num_pkts) {
+                dw_log("Number of packets inflated from %ld to %ld to fullfill ramp-up requirement\n", num_pkts, new_num_pkts);
+                num_pkts = new_num_pkts;
             }
         }
     }
