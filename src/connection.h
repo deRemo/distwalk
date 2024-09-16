@@ -41,7 +41,7 @@ typedef struct {
     req_info_t *req_list;
     unsigned int serialize_request;
     pthread_t parent_thread;
-    //pthread_mutex_t mtx;
+    pthread_mutex_t mtx;
 } conn_info_t;
 
 extern conn_info_t conns[MAX_CONNS];
@@ -49,6 +49,7 @@ extern conn_info_t conns[MAX_CONNS];
 const char *conn_status_str(conn_status_t s);
 
 void conn_init();
+void conn_destroy();
 
 int conn_alloc(int sock, struct sockaddr_in target, proto_t proto);
 void conn_free(int conn_id);
