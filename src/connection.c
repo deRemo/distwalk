@@ -136,12 +136,11 @@ int conn_find_existing(struct sockaddr_in target, proto_t proto) {
         if (proto == UDP && conns[i].parent_thread == curr_thread) {
             rv = i;
             break;
-        } else if (proto == TCP && conns[i].target.sin_port == target.sin_port && conns[i].target.sin_addr.s_addr == target.sin_addr.s_addr && conns[i].proto == proto) {
+        } else if (proto == TCP && is_same_address(conns[i].target, target) && conns[i].proto == proto) {
             rv = i;
             break;
         }
     }
-
     //if (nthread > 1)
     //    sys_check(pthread_mutex_unlock(&socks_mtx));
 

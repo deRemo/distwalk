@@ -77,7 +77,6 @@ pthread_t receiver[MAX_THREADS];
 #define MAX_RATES 1000000
 
 clockid_t clk_id = CLOCK_REALTIME;
-int clientSocket[MAX_THREADS];
 long *usecs_send[MAX_THREADS];
 long *usecs_elapsed[MAX_THREADS];
 // abs start-time of the experiment
@@ -89,14 +88,16 @@ unsigned int ramp_step_secs = 0;   // used with --rate
 
 proto_t proto = TCP;
 
-struct sockaddr_in serveraddr;
+struct sockaddr_in snd_serveraddr;
+struct sockaddr_in rcv_serveraddr;
 struct sockaddr_in myaddr;
 
 unsigned long pkts_per_session;
 
 typedef struct {
     int thread_id;
-    int conn_id;
+    int snd_conn_id;
+    int rcv_conn_id;
     int first_pkt_id;
     int num_send_pkts;
 } thread_data_t;
@@ -131,6 +132,23 @@ int try_connect(int* conn_sock, struct sockaddr_in target) {
     return connect(*conn_sock, (struct sockaddr *)&target, sizeof(target));
 }
 
+int establish_connection(struct sockaddr_in target) {
+    int rv = 0;
+    int sock = -1;
+    for(int conn_retry = 1; conn_retry <= conn_retry_num; conn_retry++) {
+        rv = try_connect(&sock, target);
+        if (rv == 0 || (rv == -1 && errno == EINPROGRESS)) {
+            dw_log("CONNECTED after %d tries\n", conn_retry);
+            break;
+        } else {
+            close(sock);
+            sock = -1;
+            usleep(conn_retry_period_ms * 1000);
+        }
+    }
+    return sock;
+}
+
 void *thread_sender(void *data) {
     thread_data_t *p = (thread_data_t *)data;
 
@@ -140,13 +158,13 @@ void *thread_sender(void *data) {
     int thread_id = p->thread_id;
     int first_pkt_id = p->first_pkt_id;
     int num_send_pkts = p->num_send_pkts;
-    struct timespec ts_now;
 
+    struct timespec ts_now;
     clock_gettime(clk_id, &ts_now);
     pd_init(time(NULL));
 
     message_t *m;
-    conn_info_t *conn = conn_get_by_id(p->conn_id);
+    conn_info_t *snd_conn = conn_get_by_id(p->snd_conn_id);
 
 #ifdef DW_DEBUG
     ccmd_log(ccmd);
@@ -154,7 +172,7 @@ void *thread_sender(void *data) {
 
     for (int i = 0; i < num_send_pkts; i++) {
         int pkt_id = first_pkt_id + i;
-        m = conn_prepare_send_message(conn);
+        m = conn_prepare_send_message(snd_conn);
         ccmd_dump(ccmd, m);
 
         // remember time of send relative to ts_start
@@ -175,7 +193,7 @@ void *thread_sender(void *data) {
             msg_log(m, "Sending msg: ");
         #endif
         
-        if (!conn_start_send(conn, conn->target)) {
+        if (!conn_start_send(snd_conn, snd_conn->target)) {
             fprintf(stderr,
                     "Forcing premature termination of sender thread while "
                     "attempting to send pkt %d\n",
@@ -252,28 +270,23 @@ void *thread_receiver(void *data) {
             if (conn_times)
                 clock_gettime(CLOCK_MONOTONIC, &ts1);
             
-            // Try to connect client socket to the server
-            dw_log("Connecting to %s:%d (sess_id=%d) ...\n", inet_ntoa((struct in_addr) {serveraddr.sin_addr.s_addr}), ntohs(serveraddr.sin_port), (int) (pkt_i / pkts_per_session));
-            int rv = 0;
-            for(int conn_retry = 1; conn_retry <= conn_retry_num; conn_retry++) {
-                rv = try_connect(&clientSocket[thread_id], serveraddr);
-                if (rv == 0 || (rv == -1 && errno == EINPROGRESS)) {
-                    dw_log("CONNECTED after %d tries\n", conn_retry);
-                    rv = 0;
-                    break;
-                } else {
-                    close(clientSocket[thread_id]);
-                    usleep(conn_retry_period_ms * 1000);
-                }
+            // Try to connect client socket to node to send messages to
+            dw_log("Connecting to %s:%d (sess_id=%d) ...\n", inet_ntoa((struct in_addr) {snd_serveraddr.sin_addr.s_addr}), ntohs(snd_serveraddr.sin_port), (int) (pkt_i / pkts_per_session));
+            int snd_sock = establish_connection(snd_serveraddr);
+            int rcv_sock = snd_sock;
+            if(!is_same_address(snd_serveraddr, rcv_serveraddr)) {
+                // Try to connect client socket to node to receive messages from
+                dw_log("Connecting to %s:%d (sess_id=%d) ...\n", inet_ntoa((struct in_addr) {rcv_serveraddr.sin_addr.s_addr}), ntohs(rcv_serveraddr.sin_port), (int) (pkt_i / pkts_per_session));
+                rcv_sock = establish_connection(rcv_serveraddr);
             }
-
             
             if (conn_times)
                 clock_gettime(CLOCK_MONOTONIC, &ts2);
             // check if connection succeeded
-            if (rv != 0) {
-                thr_data.conn_id = -1;
-                fprintf(stderr, "Connection to %s:%d failed: %s\n", inet_ntoa((struct in_addr) {serveraddr.sin_addr.s_addr}), ntohs(serveraddr.sin_port), strerror(errno));
+            if (snd_sock == -1 || rcv_sock == -1) {
+                thr_data.snd_conn_id = -1;
+                thr_data.rcv_conn_id = -1;
+                fprintf(stderr, "Connection to %s:%d failed: %s\n", inet_ntoa((struct in_addr) {snd_serveraddr.sin_addr.s_addr}), ntohs(snd_serveraddr.sin_port), strerror(errno));
                 unsigned long skip_pkts =
                     pkts_per_session - (pkt_i % pkts_per_session);
                 printf("Fast-forwarding i by %lu pkts\n", skip_pkts);
@@ -288,11 +301,17 @@ void *thread_receiver(void *data) {
                        pkt_i, thread_id, pkt_i / (int)pkts_per_session);
 
             /* spawn sender once connection is established */
-            int conn_id = conn_alloc(clientSocket[thread_id], serveraddr, proto);
+            int conn_id = conn_alloc(snd_sock, snd_serveraddr, proto);
             check(conn_id != -1, "conn_alloc() failed, consider increasing MAX_CONNS");
             conn_set_status_by_id(conn_id, READY);
+            thr_data.snd_conn_id = conn_id;
 
-            thr_data.conn_id = conn_id;
+            if (!is_same_address(snd_serveraddr, rcv_serveraddr)) {
+                conn_id = conn_alloc(rcv_sock, rcv_serveraddr, proto);
+                check(conn_id != -1, "conn_alloc() failed, consider increasing MAX_CONNS");
+                conn_set_status_by_id(conn_id, READY);
+            }
+            thr_data.rcv_conn_id = conn_id;
             thr_data.first_pkt_id = pkt_i;
             sys_check(pthread_create(&sender[thread_id], NULL, thread_sender,
                                   (void *)&thr_data));
@@ -300,10 +319,10 @@ void *thread_receiver(void *data) {
 
         /*---- Read the message from the server into the buffer ----*/
         // TODO: support receive of variable reply-size requests
-        conn_info_t *conn = conn_get_by_id(thr_data.conn_id);
+        conn_info_t *rcv_conn = conn_get_by_id(thr_data.rcv_conn_id);
 
-        recv = conn_recv(conn);
-        while (recv > 0 && (m = conn_prepare_recv_message(conn))) {
+        recv = conn_recv(rcv_conn);
+        while (recv > 0 && (m = conn_prepare_recv_message(rcv_conn))) {
             #ifdef DW_DEBUG
                 msg_log(m, "received message: ");
             #endif
@@ -364,8 +383,10 @@ void *thread_receiver(void *data) {
             dw_log("Joining sender thread\n");
             pthread_join(sender[thread_id], NULL);
 
-            close(clientSocket[thread_id]);
-            conn_free(thr_data.conn_id);
+            close(conns[thr_data.snd_conn_id].sock);
+            close(conns[thr_data.rcv_conn_id].sock);
+            conn_free(thr_data.snd_conn_id);
+            conn_free(thr_data.rcv_conn_id);
         }
     }
 
@@ -740,8 +761,22 @@ static error_t argp_client_parse_opt(int key, char *arg, struct argp_state *stat
         break;
     case ARGP_KEY_END: // post-parsing validity checks
         addr_parse(arguments->clienthostport, &myaddr);
-        addr_parse(arguments->nodehostport, &serveraddr);
+        addr_parse(arguments->nodehostport, &snd_serveraddr);
 
+        if (input_args.curr_forward_begin != NULL) {
+                fwd_opts_t fwd = input_args.curr_forward_begin->fwd;
+                struct sockaddr_in addr;
+
+                memset((char *) &addr, '\0', sizeof(struct sockaddr_in));
+                addr.sin_family = AF_INET;
+                addr.sin_addr.s_addr = fwd.fwd_host;
+                addr.sin_port = fwd.fwd_port;
+
+                if (!is_same_address(snd_serveraddr, addr))
+                    memcpy(&rcv_serveraddr, &addr, sizeof(struct sockaddr_in));
+        } else
+            memcpy(&rcv_serveraddr, &snd_serveraddr, sizeof(struct sockaddr_in));
+        
         if (send_rate_pd.prob != FIXED && ramp_step_secs == 0) {
             ccmd_destroy(&ccmd);
             argp_failure(state, 1, 0, "A non-fixed rate specification needs --rate-step-secs");
@@ -855,7 +890,8 @@ int main(int argc, char *argv[]) {
 
     printf("Configuration:\n");
     printf("  clienthost=%s\n", input_args.clienthostport);
-    printf("  serverhost=%s\n", input_args.nodehostport);
+    printf("  send serverhost=%s:%d\n", inet_ntoa((struct in_addr) {snd_serveraddr.sin_addr.s_addr}), ntohs(snd_serveraddr.sin_port));
+    printf("  recv serverhost=%s:%d\n", inet_ntoa((struct in_addr) {rcv_serveraddr.sin_addr.s_addr}), ntohs(rcv_serveraddr.sin_port));
     printf("  num_threads: %d\n", input_args.num_threads);
     printf("  num_pkts=%lu\n", num_pkts);
     printf("  period=%sus\n", pd_str(&send_period_us_pd));
@@ -880,7 +916,6 @@ int main(int argc, char *argv[]) {
     srand(time(NULL));
 
     for (int i = 0; i < MAX_THREADS; i++) {
-        clientSocket[i] = -1;
         if (i < input_args.num_threads) {
             check(usecs_send[i] = malloc(sizeof(usecs_send[0][0]) * MAX_PKTS));
             check(usecs_elapsed[i] = malloc(sizeof(usecs_send[0][0]) * MAX_PKTS));

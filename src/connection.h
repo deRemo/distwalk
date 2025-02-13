@@ -79,4 +79,8 @@ int conn_start_send(conn_info_t *conn, struct sockaddr_in target);
 int conn_send(conn_info_t *conn);
 int conn_recv(conn_info_t *conn);
 
+static inline int is_same_address(struct sockaddr_in a1, struct sockaddr_in a2) {
+    return a1.sin_port == a2.sin_port && a1.sin_addr.s_addr == a2.sin_addr.s_addr;
+}
+
 #endif /* __CONNECTION_H__ */
