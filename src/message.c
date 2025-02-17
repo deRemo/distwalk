@@ -27,6 +27,7 @@ inline const char* get_command_name(command_type_t cmd) {
     case FORWARD_BEGIN: return "FORWARD_BEGIN";
     case FORWARD_CONTINUE: return "FORWARD_CONTINUE";
     case REPLY: return "REPLY";
+    case HELLO: return "HELLO";
     case EOM: return "EOM";
     default: 
         printf("Unknown command type\n");
@@ -48,6 +49,8 @@ inline int cmd_type_size(command_type_t type) {
         return base + sizeof(load_opts_t);
     case STORE:
         return base + sizeof(store_opts_t);
+    case HELLO:
+        return base + sizeof(hello_opts_t);
     case PSKIP:
     case EOM:
         return base;
@@ -111,7 +114,8 @@ inline command_t* message_first_cmd(message_t *m) {
 command_t* message_copy_tail(message_t *m, message_t *m_dst, command_t *cmd) {
     // copy message header
     m_dst->req_id = m->req_id;
-
+    m_dst->client_req_id = m->client_req_id;
+    
     // find matching reply
     command_t *itr = cmd;
     while (itr->cmd != EOM && itr->cmd != REPLY)
@@ -128,6 +132,7 @@ command_t* message_copy_tail(message_t *m, message_t *m_dst, command_t *cmd) {
     end_command->cmd = EOM;
     
     m_dst->req_size = (unsigned char*)cmd_next(end_command) - (unsigned char*)m_dst;
+    uuid_copy(m_dst->session_uuid, m->session_uuid);
     //int skipped_len = ((unsigned char*)cmd - (unsigned char*)message_first_cmd(m));
     //m_dst->req_size = min(m_dst->req_size, m->req_size - skipped_len);
     return itr;
@@ -139,6 +144,11 @@ inline const void cmd_log(command_t* cmd) {
         char opts[64] = "";
 
         switch (c->cmd) {
+        case HELLO:
+            char struuid[UUID_STR_LEN];
+            uuid_unparse(cmd_get_opts(hello_opts_t, cmd)->sess_uuid, struuid);
+            sprintf(opts, "%s", struuid);
+            break;
         case STORE:
             sprintf(opts, "%ldb,%s,offset=%ld", cmd_get_opts(store_opts_t, c)->store_nbytes,
                     cmd_get_opts(store_opts_t, c)->wait_sync ? "sync" : "nosync",

@@ -7,10 +7,11 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <uuid/uuid.h>
 
 #define BUF_SIZE (16*1024*1024)
 
-typedef enum { COMPUTE, STORE, LOAD, PSKIP, FORWARD_BEGIN, FORWARD_CONTINUE, REPLY, EOM } command_type_t;
+typedef enum { COMPUTE, STORE, LOAD, PSKIP, FORWARD_BEGIN, FORWARD_CONTINUE, REPLY, HELLO, EOM } command_type_t;
 
 typedef enum { UDP, TCP, PROTO_NUMBER } proto_t;
 
@@ -45,6 +46,10 @@ typedef struct {
     uint32_t resp_size;   // REPLY pkt size
 } reply_opts_t;
 
+typedef struct {
+    uuid_t sess_uuid;
+} hello_opts_t;
+
 // TODO: Here we need all quantities to be network-ordered
 typedef struct {
     command_type_t cmd;  
@@ -55,10 +60,12 @@ typedef struct {
 // Data structure containing the data sent by the DistWalk Client
 // TODO: Here we need all quantities to be network-ordered
 typedef struct {
-    uint32_t req_id;   // Client-side request id
-    uint32_t req_size; // Overall message size in bytes, including commands and payload
-    int8_t status;     // 0 success, error otherwise (tipically set by dw_node)
-    command_t cmds[];  // Series of command_t with variable size
+    uint32_t req_id;        // Node-side request id
+    uint32_t client_req_id; // Client-side request id
+    uint32_t req_size;      // Overall message size in bytes, including commands and payload
+    int8_t status;          // 0 success, error otherwise (tipically set by dw_node)
+    uuid_t session_uuid;    // uniquely identify the session
+    command_t cmds[];       // Series of command_t with variable size
 } message_t;
 
 const char *proto_str(proto_t proto);

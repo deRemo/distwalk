@@ -24,7 +24,7 @@ typedef struct ccmd_node_t {
 
 void ccmd_add(queue_t* q, command_type_t cmd, pd_spec_t *p_pd_spec);
 ccmd_node_t *ccmd_skip(ccmd_node_t *curr, int n);
-int ccmd_dump(queue_t* q, message_t* m);
+int ccmd_dump(queue_t* q, message_t* m, uuid_t uuid);
 void ccmd_destroy(queue_t** q);
 void ccmd_log(queue_t* q);
 

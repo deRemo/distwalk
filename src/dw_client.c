@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <argp.h>
+#include <uuid/uuid.h>
 
 #include "dw_debug.h"
 #include "distrib.h"
@@ -164,16 +165,34 @@ void *thread_sender(void *data) {
     pd_init(time(NULL));
 
     message_t *m;
-    conn_info_t *snd_conn = conn_get_by_id(p->snd_conn_id);
-
 #ifdef DW_DEBUG
     ccmd_log(ccmd);
 #endif
 
+    conn_info_t *snd_conn = conn_get_by_id(p->snd_conn_id);
+    conn_info_t *rcv_conn = conn_get_by_id(p->rcv_conn_id);
+
+    if (snd_conn != rcv_conn) {
+        m = conn_prepare_send_message(rcv_conn);
+        command_t* c_itr = message_first_cmd(m);
+        uuid_copy(cmd_get_opts(hello_opts_t, c_itr)->sess_uuid, rcv_conn->binuuid);
+        c_itr->cmd = HELLO;
+        c_itr = cmd_next(c_itr);
+        c_itr->cmd = EOM;
+        //m->req_size -= cmd_type_size(HELLO) + cmd_type_size(EOM);
+        m->req_size = pd_sample(&send_pkt_size_pd);
+        if (!conn_start_send(rcv_conn, rcv_conn->target)) {
+            fprintf(stderr, "Forcing premature termination of sender thread:"
+                            "couldn't communicate session uuid to last node\n");
+            goto err;
+        }
+    }
+    
     for (int i = 0; i < num_send_pkts; i++) {
         int pkt_id = first_pkt_id + i;
         m = conn_prepare_send_message(snd_conn);
-        ccmd_dump(ccmd, m);
+        ccmd_dump(ccmd, m, snd_conn->binuuid);
+        uuid_copy(m->session_uuid, snd_conn->binuuid);
 
         // remember time of send relative to ts_start
         struct timespec ts_send;
@@ -185,6 +204,7 @@ void *thread_sender(void *data) {
 
         // Issue a request to the server
         m->req_id = pkt_id;
+        m->client_req_id = pkt_id;
         m->req_size = pd_sample(&send_pkt_size_pd);
 
         dw_log("sending %u bytes...\n", m->req_size);
@@ -235,6 +255,7 @@ void *thread_sender(void *data) {
         }
     }
 
+    err:
     dw_log("Sender thread terminating\n");
     return 0;
 }
@@ -301,14 +322,19 @@ void *thread_receiver(void *data) {
                        pkt_i, thread_id, pkt_i / (int)pkts_per_session);
 
             /* spawn sender once connection is established */
+            uuid_t sess_uuid;
+            uuid_generate_random(sess_uuid);
+
             int conn_id = conn_alloc(snd_sock, snd_serveraddr, proto);
             check(conn_id != -1, "conn_alloc() failed, consider increasing MAX_CONNS");
+            uuid_copy(conn_get_by_id(conn_id)->binuuid, sess_uuid);
             conn_set_status_by_id(conn_id, READY);
             thr_data.snd_conn_id = conn_id;
 
-            if (!is_same_address(snd_serveraddr, rcv_serveraddr)) {
+            if (snd_sock != rcv_sock) {
                 conn_id = conn_alloc(rcv_sock, rcv_serveraddr, proto);
                 check(conn_id != -1, "conn_alloc() failed, consider increasing MAX_CONNS");
+                uuid_copy(conn_get_by_id(conn_id)->binuuid, sess_uuid);
                 conn_set_status_by_id(conn_id, READY);
             }
             thr_data.rcv_conn_id = conn_id;
@@ -327,7 +353,7 @@ void *thread_receiver(void *data) {
                 msg_log(m, "received message: ");
             #endif
 
-            unsigned pkt_id = m->req_id;
+            unsigned pkt_id = m->client_req_id;
             if (m->status != 0) {
                 dw_log("REPLY reported an error\n");
                 num_failed++;
@@ -818,9 +844,9 @@ static error_t argp_client_parse_opt(int key, char *arg, struct argp_state *stat
         check(queue_size(arguments->reserved_fwd_replies) == 0);
         queue_free(arguments->reserved_fwd_replies);
 
-        if (ccmd_last(ccmd) == arguments->last_reserved_used || ccmd_last(ccmd)->cmd != REPLY) { // edge-case (TODO: eventually this must be removed)
+        /*if (ccmd_last(ccmd) == arguments->last_reserved_used || ccmd_last(ccmd)->cmd != REPLY) { // edge-case (TODO: eventually this must be removed)
             ccmd_add(ccmd, REPLY, &arguments->last_resp_size);
-        }
+        }*/
         break;
     default:
         return ARGP_ERR_UNKNOWN;

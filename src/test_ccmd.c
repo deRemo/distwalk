@@ -353,7 +353,7 @@ bool test_ccmd_dump() {
     message_t *m = (message_t *)send_buf;
     m->req_size = BUF_SIZE;
 
-    ccmd_dump(ccmd, m);
+    ccmd_dump(ccmd, m, NULL);
 
     bool res = false;
 

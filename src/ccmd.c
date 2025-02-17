@@ -51,7 +51,7 @@ ccmd_node_t* ccmd_skip(ccmd_node_t* node, int to_skip) {
 }
 
 // returns 1 if the message has been succesfully copied, 0 if there is not enough space (saved in req_size field)
-int ccmd_dump(queue_t* q, message_t* m) {
+int ccmd_dump(queue_t* q, message_t* m, uuid_t uuid) {
     check(q, "ccmd_dump() error - Initialize queue first");
     check(m, "ccmd_dump() error - NullPointer message_t*");
 
@@ -59,6 +59,10 @@ int ccmd_dump(queue_t* q, message_t* m) {
 
     double x = 0;
     command_t *m_cmd_itr = message_first_cmd(m);
+    m->req_size -= cmd_type_size(HELLO);
+    uuid_copy(cmd_get_opts(hello_opts_t, m_cmd_itr)->sess_uuid, uuid);
+    m_cmd_itr->cmd = HELLO;
+    m_cmd_itr = cmd_next(m_cmd_itr);
 
     while (ccmd_itr) {
         m_cmd_itr->cmd = ccmd_itr->cmd;
@@ -141,6 +145,8 @@ void ccmd_log(queue_t* q) {
         char opts[128] = "";
 
         switch (curr->cmd) {
+            case HELLO:
+                break;
             case STORE:
                 sprintf(opts, "%sb,%s,offset=%s", pd_str(&curr->pd_val),
                         curr->store.wait_sync ? "sync" : "nosync", pd_str(&curr->pd_val2));

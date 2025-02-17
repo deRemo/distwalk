@@ -21,6 +21,7 @@ const char *conn_status_str(conn_status_t s) {
 
 void conn_init() {
     for (int i = 0; i < MAX_CONNS; i++) {
+        uuid_clear(conns[i].binuuid);
         conns[i].recv_buf = NULL;
         conns[i].send_buf = NULL;
         conns[i].sock = -1;
@@ -200,7 +201,8 @@ void conn_free(int conn_id) {
     conn_reset(&conns[conn_id]);
     free(conns[conn_id].recv_buf);   
     conns[conn_id].recv_buf = NULL;
-    free(conns[conn_id].send_buf);   
+    free(conns[conn_id].send_buf);
+    uuid_clear(conns[conn_id].binuuid);  
     conns[conn_id].send_buf = NULL;
     conns[conn_id].status = CLOSE;
     conns[conn_id].sock = -1;
@@ -228,13 +230,15 @@ int conn_alloc(int conn_sock, struct sockaddr_in target, proto_t proto) {
 
     conns[conn_id].proto = proto;
     conns[conn_id].target = target;
+
+    uuid_clear(conns[conn_id].binuuid);
     conns[conn_id].sock = conn_sock;
     conns[conn_id].status = (proto == TCP ? NOT_INIT : READY);
     conns[conn_id].recv_buf = new_recv_buf;
     conns[conn_id].send_buf = new_send_buf;
     conns[conn_id].parent_thread = pthread_self(); 
 
-    dw_log("CONN allocated, conn_id: %d\n", conn_id);
+    dw_log("CONN allocated for %s:%d, conn_id: %d\n", inet_ntoa((struct in_addr) {target.sin_addr.s_addr}), ntohs(target.sin_port), conn_id);
     conns[conn_id].curr_recv_buf = conns[conn_id].recv_buf;
     conns[conn_id].curr_proc_buf = conns[conn_id].recv_buf;
     conns[conn_id].curr_recv_size = BUF_SIZE;

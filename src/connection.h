@@ -5,6 +5,8 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <netinet/in.h>
+#include <uuid/uuid.h>
+
 #include "message.h"
 #include "request.h"
 
@@ -25,6 +27,7 @@ typedef struct {
     conn_status_t status;         // status of the connection
 
     struct sockaddr_in target;    // target of the connection
+    uuid_t binuuid;               // uniquely identify the connected peer
 
     unsigned char *recv_buf;      // receive buffer
     unsigned char *send_buf;      // send buffer

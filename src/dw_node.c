@@ -368,6 +368,7 @@ command_t *single_start_forward(req_info_t *req, message_t *m, command_t *cmd, d
     }
 
     m_dst->req_id = req->req_id;
+    m_dst->client_req_id = m->client_req_id;
     m_dst->req_size = fwd.pkt_size;
 
     dw_log("Forwarding req %u to %s:%d\n", m_dst->req_id,
@@ -466,7 +467,26 @@ int handle_forward_reply(int req_id, dw_poll_t *p_poll, conn_worker_info_t* info
 
 // returns 1 if reply sent correctly, 0 otherwise
 int reply(req_info_t *req, message_t *m, command_t *cmd, conn_worker_info_t* infos) {
-    message_t *m_dst = conn_prepare_send_message(&conns[req->conn_id]);
+    int reply_conn_id;
+    conn_info_t* reply_conn;
+    for (reply_conn_id = 0; reply_conn_id < MAX_CONNS; reply_conn_id++) {
+        reply_conn = conn_get_by_id(reply_conn_id);
+        if (reply_conn->sock == -1)
+            continue;
+
+        if (uuid_compare(m->session_uuid, reply_conn->binuuid) == 0) {
+            printf("Matched with user conn_id: %d, %s:%d\n", reply_conn_id, inet_ntoa((struct in_addr) {reply_conn->target.sin_addr.s_addr}), ntohs(reply_conn->target.sin_port));
+            break;
+        }
+    }
+
+    if (reply_conn_id == MAX_CONNS) {
+        printf("Couldn't match session id to any connection, sending message back to sender peer\n");
+        reply_conn_id = req->conn_id;
+        reply_conn = conn_get_by_id(req->conn_id);
+    }
+
+    message_t *m_dst = conn_prepare_send_message(reply_conn);
     reply_opts_t *opts = cmd_get_opts(reply_opts_t, cmd);
     assert(m_dst->req_size >= opts->resp_size);
 
@@ -475,18 +495,15 @@ int reply(req_info_t *req, message_t *m, command_t *cmd, conn_worker_info_t* inf
     m_dst->cmds[0].cmd = EOM;
     m_dst->status = m->status;
 
-    dw_log("Replying to req %u (conn_id=%d)\n", m->req_id, req->conn_id);
+    dw_log("Replying to req %u (conn_id=%d)\n", m->req_id, reply_conn_id);
 #ifdef DW_DEBUG
     msg_log(m_dst, "REPLY ");
 #endif
 
-    conn_info_t *conn = conn_get_by_id(req->conn_id);
-    // cannot access req after conn_req_remove()
-    int conn_id = req->conn_id;
     struct sockaddr_in target = req->target;
-    conn_req_remove(conn, req);
+    conn_req_remove(conn_get_by_id(req->conn_id), req);
     infos->active_reqs--;
-    return conn_start_send(&conns[conn_id], target);
+    return conn_start_send(reply_conn, target);
 }
 
 void compute_for_freqinv(unsigned long usecs) {
@@ -650,6 +667,12 @@ int process_single_message(req_info_t *req, dw_poll_t *p_poll, conn_worker_info_
     for (command_t *cmd = req->curr_cmd; cmd->cmd != EOM; cmd = cmd_skip(cmd, 1)) {
         dw_log("PROCESS conn_id: %d, req_id: %d,  command: %s\n", req->conn_id, req->req_id, get_command_name(cmd->cmd));
         switch(cmd->cmd) {
+        case HELLO:
+            char struuid[UUID_STR_LEN];
+            uuid_copy(conns[req->conn_id].binuuid, cmd_get_opts(hello_opts_t, cmd)->sess_uuid);
+            uuid_unparse(conns[req->conn_id].binuuid, struuid);
+            fprintf(stderr, "Allocated sess-id: %s for conn-id: %d\n", struuid, req->conn_id);
+            break;
         case COMPUTE:
             compute_for(cmd_get_opts(comp_opts_t, cmd)->comp_time_us);
             break;
@@ -697,6 +720,8 @@ int process_single_message(req_info_t *req, dw_poll_t *p_poll, conn_worker_info_
         }
     }
 
+    //conn_req_remove(conn_get_by_id(req->conn_id), req);
+    //infos->active_reqs--;
     return 1;
 }
 
